@@ -267,7 +267,7 @@ void loop() {
     quadCopterRL = userInputLUD + ((int)(ym - 1000)/2) - userInputLLR;
     quadCopterRR = userInputLUD - ((int)(ym - 1000)/2) + userInputLLR;
   }
-  //algorithyms for movement
+  //algorithms for movement
   quadCopterFL = userInputLUD + userInputRLR - userInputRUD + userInputLLR;
   quadCopterFR = userInputLUD - userInputRLR - userInputRUD - userInputLLR;
   quadCopterRL = userInputLUD + userInputRLR + userInputRUD - userInputLLR;
