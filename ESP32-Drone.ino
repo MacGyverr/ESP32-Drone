@@ -1,4 +1,5 @@
 #include <IBusBM.h>
+
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
@@ -7,27 +8,32 @@
 #include "ESC.h" // RC_ESP library
 #include "RunningMedian.h"
 
+
+
 #define ESC_PIN0 (13) // connected to ESC control wire
 #define ESC_PIN1 (12) // connected to ESC control wire
 #define ESC_PIN2 (14) // connected to ESC control wire
 #define ESC_PIN3 (27) // connected to ESC control wire
 #define LED_BUILTIN (2) // not defaulted properly for ESP32s/you must define it
 #define MIN_SPEED 1000 // speed just slow enough to turn motor off
+#define SPIN_SPEED 1055 // speed just slow enough to turn motor off
 #define MAX_SPEED 2000 // speed where my motor drew 3.6 amps at 12v.
+#define ARM_SPEED 500 // arm value
 #define GYRO0 32
 #define GYRO1 33
 #define GYRO2 34
 #define GYRO3 35
 
 IBusBM IBus;    // IBus object
-ESC myESC0 (ESC_PIN0, 1000, 2000, 500); // ESC_Name (PIN, Minimum Value, Maximum Value, Arm Value)
-ESC myESC1 (ESC_PIN1, 1000, 2000, 500); 
-ESC myESC2 (ESC_PIN2, 1000, 2000, 500); 
-ESC myESC3 (ESC_PIN3, 1000, 2000, 500); 
+ESC myESC0 (ESC_PIN0, MIN_SPEED, MAX_SPEED, ARM_SPEED); // ESC_Name (PIN, Minimum Value, Maximum Value, Arm Value)
+ESC myESC1 (ESC_PIN1, MIN_SPEED, MAX_SPEED, ARM_SPEED); 
+ESC myESC2 (ESC_PIN2, MIN_SPEED, MAX_SPEED, ARM_SPEED); 
+ESC myESC3 (ESC_PIN3, MIN_SPEED, MAX_SPEED, ARM_SPEED); 
 Adafruit_MPU6050 mpu;
 MS5x barometer(&Wire);
 RunningMedian samplesX = RunningMedian(20);
 RunningMedian samplesY = RunningMedian(20);
+RunningMedian samplesALT = RunningMedian(30);
 
 long int val; // variable to read the value from the IBus
 unsigned long prevTime = 0;
@@ -40,6 +46,10 @@ float gyro_x, gyro_y, gyro_z;
 double pressure = 0;
 double temperature = 0;
 double altitude = 0;
+  int firstrun = 1;
+  int battery_voltage;
+  float holdAltitude;
+  int holdThrottle;
 
 
 void setup() {
@@ -60,15 +70,15 @@ void setup() {
   
 //calibrate ESCs by setting them to high till it clicks twice, then to lowest until it clicks three times, trips when powered on and SWC is in the middle
   if (IBus.readChannel(8) == 1500){
-    myESC0.speed(2000);
-    myESC1.speed(2000);
-    myESC2.speed(2000);
-    myESC3.speed(2000);
+    myESC0.speed(MAX_SPEED);
+    myESC1.speed(MAX_SPEED);
+    myESC2.speed(MAX_SPEED);
+    myESC3.speed(MAX_SPEED);
     delay(6000);
-    myESC0.speed(1000);
-    myESC1.speed(1000);
-    myESC2.speed(1000);
-    myESC3.speed(1000);
+    myESC0.speed(MIN_SPEED);
+    myESC1.speed(MIN_SPEED);
+    myESC2.speed(MIN_SPEED);
+    myESC3.speed(MIN_SPEED);
     delay(5000); 
   }
   Serial.println("Arming ESCs"); 
@@ -82,17 +92,17 @@ void setup() {
   // the following loop turns on the motor slowly, so get ready
   Serial.println("Spinning up Motors"); 
   for (int i=0; i<60; i++){ // run speed from 1045 to 1060
-    myESC0.speed(MIN_SPEED+i); // spin motor up a little (13)
-    myESC1.speed(MIN_SPEED+i); // spin motor up a little (12)
-    myESC2.speed(MIN_SPEED+i); // spin motor up a little (14)
-    myESC3.speed(MIN_SPEED+i); // spin motor up a little (27)
+    myESC0.speed(1000+i); // spin motor up a little (13)
+    myESC1.speed(1000+i); // spin motor up a little (12)
+    myESC2.speed(1000+i); // spin motor up a little (14)
+    myESC3.speed(1000+i); // spin motor up a little (27)
     delay(10);
   }
   Serial.println("Setting motors to minimum"); 
-  myESC0.speed(MIN_SPEED); // spin motor down (13)
-  myESC1.speed(MIN_SPEED); // spin motor down (12)
-  myESC2.speed(MIN_SPEED); // spin motor down (14)
-  myESC3.speed(MIN_SPEED); // spin motor down (27)
+  myESC0.speed(1000); // spin motor down (13)
+  myESC1.speed(1000); // spin motor down (12)
+  myESC2.speed(1000); // spin motor down (14)
+  myESC3.speed(1000); // spin motor down (27)
   
   pinMode(GYRO0, OUTPUT);
   pinMode(GYRO1, OUTPUT);
@@ -224,8 +234,7 @@ void setup() {
 void loop() {
   float xm = samplesX.getMedian();
   float ym = samplesY.getMedian();
-  float xa = samplesX.getAverage();
-  float ya = samplesY.getAverage();
+  float am = samplesALT.getMedian();
   unsigned long timer = millis()/1000;
   int x, y;
   int quadCopterFL = 1000;
@@ -240,7 +249,11 @@ void loop() {
   int userInputLLR = 0;
   int userInputRUD = 0;
   int userInputRLR = 0;
+  int userInputSWA = 0;
+  int userInputSWB = 0;
+  int userInputSWD = 0;
   float gyrotemp;
+  int altFEET;
 
   unsigned long currentMillis = millis(); 
   /* 
@@ -249,37 +262,76 @@ void loop() {
    prevTime = currentMillis;
   }
 */
+  //calculate battery level from drop down
+  battery_voltage = (analogRead(4) + 65) * 1.2317;
+  battery_voltage = battery_voltage * 0.92 + (analogRead(4) + 65) * 0.09853;
+
+  //Turn on the led if battery voltage is to low.
+  if(battery_voltage < 1000 && battery_voltage > 600)digitalWrite(LED_BUILTIN, HIGH);
+
 
   readGyro(&x, &y);
   samplesX.add(x);
   samplesY.add(y);
+  samplesALT.add(altitude);
+
   
+  altFEET = (int)am/.3048;
   userInputLUD = map(IBus.readChannel(2), 1000, 2000, 1000, 2000); //left stick / up/down
   userInputLLR = map(IBus.readChannel(3), 1000, 2000, -500, 500); //left stick / left/right
   userInputRUD = map(IBus.readChannel(1), 1000, 2000, -500, 500); //right stick / up/down
   userInputRLR = map(IBus.readChannel(0), 1000, 2000, -500, 500); //right stick / left/right
-  
-  
-  if (IBus.readChannel(6) == 1000 && userInputLUD < 1055){userInputLUD = 1056;}  //safety switch, if SWA is up, then don't let the motors turn off completely
-  if ((userInputRUD > 1490 && userInputRUD < 1510) && (userInputRLR > 1490 && userInputRLR < 1510)) {  //if not moving, let auto-level work, rotate will still work
+  userInputSWD = IBus.readChannel(9);
+  userInputSWA = IBus.readChannel(6);
+  userInputSWB = IBus.readChannel(7);
+
+  if (userInputSWD == 1000){  //if SWD is up, then hold altitude
+    if (firstrun == 1) {holdAltitude = altFEET; holdThrottle = userInputLUD; firstrun = 0;}  //first time on? set throttle and alt to current
+    if (firstrun == 0) { //is on, not new
+
+  //run everything inside here every half second
+  if ((unsigned long)(currentMillis - prevTime) >= 500) {
+      prevTime = currentMillis;
+      if (altFEET < holdAltitude) {holdThrottle += 10;}  // getting lower, add some speed
+      if (altFEET > holdAltitude) {holdThrottle -= 10;}  //getting higher, reduce some speed      
+  }
+    }
+    userInputLUD = holdThrottle; //set the user left stick(throttle) to whatever the altimiter wants
+  }  
+  if (userInputSWD == 2000){firstrun = 1;} //if SWD is down, then reset hold altittude
+ 
+  if (userInputLUD > 1000 && userInputLUD < SPIN_SPEED){userInputLUD = 1000;}   
+  if (userInputSWA == 1000 && userInputLUD < SPIN_SPEED){userInputLUD = SPIN_SPEED+1;}  //safety switch, if SWA is up, then don't let the motors turn off completely
+
+  //algorithms for movement
+  if ((userInputLUD >= SPIN_SPEED)) { 
+    quadCopterFL = userInputLUD + userInputRLR - userInputRUD + userInputLLR;
+    quadCopterFR = userInputLUD - userInputRLR - userInputRUD - userInputLLR;
+    quadCopterRL = userInputLUD + userInputRLR + userInputRUD - userInputLLR;
+    quadCopterRR = userInputLUD - userInputRLR + userInputRUD + userInputLLR;
+  }
+  if ((userInputRUD > -5 && userInputRUD < 5) && (userInputRLR > -5 && userInputRLR < 5) && (userInputSWB == 1000) && (userInputLUD > SPIN_SPEED+1)) {  //if user not moving right stick, SWB is up, and it's not idling, let auto-level work, rotate will still work
     quadCopterFL = userInputLUD + ((int)(xm - 1000)/2) + userInputLLR;
     quadCopterFR = userInputLUD - ((int)(xm - 1000)/2) - userInputLLR;
     quadCopterRL = userInputLUD + ((int)(ym - 1000)/2) - userInputLLR;
     quadCopterRR = userInputLUD - ((int)(ym - 1000)/2) + userInputLLR;
   }
-  //algorithms for movement
-  quadCopterFL = userInputLUD + userInputRLR - userInputRUD + userInputLLR;
-  quadCopterFR = userInputLUD - userInputRLR - userInputRUD - userInputLLR;
-  quadCopterRL = userInputLUD + userInputRLR + userInputRUD - userInputLLR;
-  quadCopterRR = userInputLUD - userInputRLR + userInputRUD + userInputLLR;
-  if (userInputLUD > 1055 && quadCopterFL < 1055){quadCopterFL = 1055;}  //don't let the motors stop from user movements
-  if (quadCopterFL > 2000){quadCopterFL = 2000;}
-  if (userInputLUD > 1055 && quadCopterFR < 1055){quadCopterFR = 1055;}  //don't let the motors stop from user movements
+
+/*
+  if (battery_voltage < 1240 && battery_voltage > 800){  //Is the battery connected?
+    quadCopterFL += quadCopterFL * ((1240 - battery_voltage)/(float)3500);   //Compensate the ESC pulse for voltage drop.
+    quadCopterFR += quadCopterFR * ((1240 - battery_voltage)/(float)3500);
+    quadCopterRL += quadCopterRL * ((1240 - battery_voltage)/(float)3500);
+    quadCopterRR += quadCopterRR * ((1240 - battery_voltage)/(float)3500);
+  } 
+*/
+  if (userInputLUD >= SPIN_SPEED && quadCopterFL < SPIN_SPEED){quadCopterFL = SPIN_SPEED;}  //don't let the motors drop below spinning speed
+  if (quadCopterFL > 2000){quadCopterFL = 2000;}                          //don't let the motor go faster than max
+  if (userInputLUD >= SPIN_SPEED && quadCopterFR < SPIN_SPEED){quadCopterFR = SPIN_SPEED;}
   if (quadCopterFR > 2000){quadCopterFR = 2000;}
-  
-  if (userInputLUD > 1055 && quadCopterRL < 1055){quadCopterRL = 1055;}  //don't let the motors stop from user movements
+  if (userInputLUD >= SPIN_SPEED && quadCopterRL < SPIN_SPEED){quadCopterRL = SPIN_SPEED;}
   if (quadCopterRL > 2000){quadCopterRL = 2000;}
-  if (userInputLUD > 1055 && quadCopterRR < 1055){quadCopterRR = 1055;}  //don't let the motors stop from user movements
+  if (userInputLUD >= SPIN_SPEED && quadCopterRR < SPIN_SPEED){quadCopterRR = SPIN_SPEED;} 
   if (quadCopterRR > 2000){quadCopterRR = 2000;}
   
   quadCopterFLmotor = map(quadCopterFL, 1000, 2000, MIN_SPEED, MAX_SPEED); // scale input to valid speed range
